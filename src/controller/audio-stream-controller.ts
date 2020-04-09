@@ -1,4 +1,4 @@
-import { BufferHelper } from '../utils/buffer-helper';
+import { Bufferable, BufferHelper } from '../utils/buffer-helper';
 import TransmuxerInterface from '../demux/transmuxer-interface';
 import { Events } from '../events';
 import TimeRanges from '../utils/time-ranges';
@@ -35,7 +35,7 @@ class AudioStreamController extends BaseStreamController implements ComponentAPI
   private onvseeking: EventListener | null = null;
   private onvseeked: EventListener | null = null;
   private onvended: EventListener | null = null;
-  private videoBuffer: any | null = null;
+  private videoBuffer: Bufferable | null = null;
   private initPTS: any = [];
   private videoTrackCC: number = -1;
   private audioSwitch: boolean = false;
@@ -49,7 +49,8 @@ class AudioStreamController extends BaseStreamController implements ComponentAPI
     this.config = hls.config;
     this.fragmentTracker = fragmentTracker;
     this.fragmentLoader = new FragmentLoader(hls.config);
-
+    this.log = logger.log.bind(logger, this.logPrefix);
+    this.warn = logger.warn.bind(logger, this.logPrefix);
     this._registerListeners();
   }
 
@@ -194,7 +195,7 @@ class AudioStreamController extends BaseStreamController implements ComponentAPI
       // Exit early if we don't have media or if the media hasn't buffered anything yet (readyState 0)
       return;
     }
-    const mediaBuffer = this.mediaBuffer ? this.mediaBuffer : media;
+    const mediaBuffer = (this.mediaBuffer || media) as Bufferable;
     const buffered = mediaBuffer.buffered;
 
     if (!this.loadedmetadata && buffered.length) {
@@ -230,8 +231,8 @@ class AudioStreamController extends BaseStreamController implements ComponentAPI
     }
     const levelInfo = levels[trackId];
 
-    const mediaBuffer = this.mediaBuffer ? this.mediaBuffer : this.media;
-    const videoBuffer = this.videoBuffer ? this.videoBuffer : this.media;
+    const mediaBuffer = (this.mediaBuffer || this.media) as Bufferable;
+    const videoBuffer = (this.videoBuffer || this.media) as Bufferable;
     const bufferInfo = BufferHelper.bufferInfo(mediaBuffer, pos, config.maxBufferHole);
     const mainBufferInfo = BufferHelper.bufferInfo(videoBuffer, pos, config.maxBufferHole);
     const bufferLen = bufferInfo.len;
@@ -263,12 +264,17 @@ class AudioStreamController extends BaseStreamController implements ComponentAPI
     if (audioSwitch) {
       loadPos = pos;
       // if currentTime (pos) is less than alt audio playlist start time, it means that alt audio is ahead of currentTime
-      if (trackDetails.PTSKnown && pos < start) {
+      if (trackDetails.PTSKnown && pos < start && media !== null) {
         // if everything is buffered from pos to start or if audio buffer upfront, let's seek to start
         if (bufferInfo.end > start || bufferInfo.nextStart) {
           this.log('Alt audio track ahead of main track, seek to start of alt audio track');
           media.currentTime = start + 0.05;
         }
+
+      // TODO: This does not help. Remove it. It does help reproduce the state where video is ahead and audio buffering drops segments!
+      } else if (trackDetails.live && !trackDetails.PTSKnown) {
+        // logger.log('switching audiotrack, live stream, unknown PTS,load first fragment');
+        // loadPos = 0;
       }
     }
 
@@ -282,7 +288,9 @@ class AudioStreamController extends BaseStreamController implements ComponentAPI
       this.state = State.KEY_LOADING;
       hls.trigger(Events.KEY_LOADING, { frag: frag });
     } else {
-      this.log(`Loading ${frag.sn}, cc: ${frag.cc} of [${trackDetails.startSN} ,${trackDetails.endSN}],track ${trackId}, currentTime:${pos},bufferEnd:${bufferInfo.end.toFixed(3)}`);
+      if (!this.fragCurrent || this.fragCurrent.sn !== frag.sn) {
+        this.log(`Loading fragment ${frag.sn}, cc: ${frag.cc} of [${trackDetails.startSN} ,${trackDetails.endSN}],track ${trackId}, currentTime:${pos},bufferEnd:${bufferInfo.end.toFixed(3)}`);
+      }
       this.loadFragment(frag);
     }
   }
@@ -293,10 +301,6 @@ class AudioStreamController extends BaseStreamController implements ComponentAPI
     this.onvended = this.onMediaEnded.bind(this);
     media.addEventListener('seeking', this.onvseeking as EventListener);
     media.addEventListener('ended', this.onvended as EventListener);
-    const config = this.config;
-    if (this.levels && config.autoStartLoad) {
-      this.startLoad(config.startPosition);
-    }
   }
 
   onMediaDetaching () {
@@ -308,14 +312,15 @@ class AudioStreamController extends BaseStreamController implements ComponentAPI
 
     // remove video listeners
     if (media) {
-      media.removeEventListener('seeking', this.onvseeking);
-      media.removeEventListener('ended', this.onvended);
+      media.removeEventListener('seeking', this.onvseeking as EventListener);
+      media.removeEventListener('ended', this.onvended as EventListener);
       this.onvseeking = this.onvseeked = this.onvended = null;
     }
-    this.media = this.mediaBuffer = this.videoBuffer = null;
-    this.loadedmetadata = false;
+
     this.fragmentTracker.removeAllFragments();
-    this.stopLoad();
+
+    super.onMediaDetaching();
+    this.videoBuffer = null;
   }
 
   onAudioTracksUpdated (event: Events.AUDIO_TRACKS_UPDATED, { audioTracks }: AudioTracksUpdatedData) {
@@ -446,10 +451,10 @@ class AudioStreamController extends BaseStreamController implements ComponentAPI
   onBufferCreated (event: Events.BUFFER_CREATED, data: BufferCreatedData) {
     const audioTrack = data.tracks.audio;
     if (audioTrack) {
-      this.mediaBuffer = audioTrack.buffer;
+      this.mediaBuffer = audioTrack.buffer as Bufferable;
     }
     if (data.tracks.video) {
-      this.videoBuffer = data.tracks.video.buffer;
+      this.videoBuffer = data.tracks.video.buffer as Bufferable;
     }
   }
 
@@ -465,7 +470,7 @@ class AudioStreamController extends BaseStreamController implements ComponentAPI
       return;
     }
     this.fragPrevious = frag;
-    const media = this.mediaBuffer ? this.mediaBuffer : this.media;
+    const media = (this.mediaBuffer || this.media) as Bufferable;
     this.log(`Buffered fragment ${frag.sn} of level ${frag.level}. PTS:[${frag.startPTS},${frag.endPTS}],DTS:[${frag.startDTS}/${frag.endDTS}], Buffered: ${TimeRanges.toString(media.buffered)}`);
     if (this.audioSwitch && frag.sn !== 'initSegment') {
       this.audioSwitch = false;
@@ -530,10 +535,10 @@ class AudioStreamController extends BaseStreamController implements ComponentAPI
       break;
     case ErrorDetails.BUFFER_FULL_ERROR:
       // if in appending state
-      if (data.parent === 'audio' && (this.state === State.PARSING || this.state === State.PARSED)) {
-        const media = this.mediaBuffer;
+      if (data.parent === 'audio' && this.media !== null && (this.state === State.PARSING || this.state === State.PARSED)) {
+        const mediaBuffer = this.mediaBuffer;
         const currentTime = this.media.currentTime;
-        const mediaBuffered = media && BufferHelper.isBuffered(media, currentTime) && BufferHelper.isBuffered(media, currentTime + 0.5);
+        const mediaBuffered = mediaBuffer && BufferHelper.isBuffered(mediaBuffer, currentTime) && BufferHelper.isBuffered(mediaBuffer, currentTime + 0.5);
         // reduce max buf len if current position is buffered
         if (mediaBuffered) {
           const config = this.config;
@@ -576,8 +581,10 @@ class AudioStreamController extends BaseStreamController implements ComponentAPI
 
   private _handleTransmuxComplete (transmuxResult: TransmuxerResult) {
     const id = 'audio';
-    const { hls } = this;
+    const { hls, audioSwitch } = this;
     const { remuxResult, chunkMeta } = transmuxResult;
+
+    this.state = State.PARSING;
 
     const context = this.getCurrentContext(chunkMeta);
     if (!context) {
@@ -587,8 +594,7 @@ class AudioStreamController extends BaseStreamController implements ComponentAPI
     const { frag } = context;
     const { audio, text, id3, initSegment } = remuxResult;
 
-    this.state = State.PARSING;
-    if (this.audioSwitch && audio) {
+    if (audioSwitch && audio) {
       this.completeAudioSwitch();
     }
 
@@ -599,6 +605,10 @@ class AudioStreamController extends BaseStreamController implements ComponentAPI
     }
     if (audio) {
       frag.setElementaryStreamInfo(ElementaryStreamTypes.AUDIO, audio.startPTS, audio.endPTS, audio.startDTS, audio.endDTS);
+      if (audioSwitch && this.levels && audio.baseMediaDecodeTimes) {
+        frag.start = audio.baseMediaDecodeTimes[0] || frag.start;
+        // this.updateLevelTiming(frag, this.levels[frag.level]);
+      }
       this.bufferFragmentData(audio, frag, chunkMeta);
     }
 
@@ -651,22 +661,26 @@ class AudioStreamController extends BaseStreamController implements ComponentAPI
     // we force a frag loading in audio switch as fragment tracker might not have evicted previous frags in case of quick audio switch
     const fragState = this.fragmentTracker.getState(frag);
     this.fragCurrent = frag;
-    const prevPos = this.nextLoadPosition;
+    // const prevPos = this.nextLoadPosition;
 
     if (!this.audioSwitch && fragState !== FragmentState.NOT_LOADED) {
-      return;
+      if (fragState !== FragmentState.PARTIAL) {
+        return;
+      } else {
+        this.log('Reloading partial fragment');
+      }
     }
 
     if (frag.sn === 'initSegment') {
       this._loadInitSegment(frag);
     } else if (Number.isFinite(this.initPTS[frag.cc])) {
-      this.startFragRequested = true;
       this.nextLoadPosition = frag.start + frag.duration;
       this._loadFragForPlayback(frag);
+      this.startFragRequested = true;
     } else {
       this.log(`Unknown video PTS for continuity counter ${frag.cc}, waiting for video PTS before loading audio fragment ${frag.sn} of level ${this.trackId}`);
       this.state = State.WAITING_INIT_PTS;
-      this.nextLoadPosition = prevPos;
+      // this.nextLoadPosition = prevPos;
     }
   }
 

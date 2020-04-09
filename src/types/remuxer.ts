@@ -17,19 +17,20 @@ export interface Remuxer {
 }
 
 export interface RemuxedTrack {
-    data1: Uint8Array
-    data2?: Uint8Array
-    startPTS: number
-    endPTS: number
-    startDTS: number
-    endDTS: number
-    type: SourceBufferName
-    hasAudio: boolean
-    hasVideo: boolean
-    nb: number
-    transferredData1?: ArrayBuffer
-    transferredData2?: ArrayBuffer
-    dropped?: number
+  data1: Uint8Array
+  data2?: Uint8Array
+  startPTS: number
+  endPTS: number
+  startDTS: number
+  endDTS: number
+  type: SourceBufferName
+  hasAudio: boolean
+  hasVideo: boolean
+  nb: number
+  transferredData1?: ArrayBuffer
+  transferredData2?: ArrayBuffer
+  dropped?: number,
+  baseMediaDecodeTimes?: number[]
 }
 
 export interface RemuxedMetadata {
@@ -49,6 +50,6 @@ export interface RemuxerResult {
 }
 
 export interface InitSegmentData {
-    tracks?: TrackSet
-    initPTS?: number
+  tracks?: TrackSet
+  initPTS: number
 }
