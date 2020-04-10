@@ -388,8 +388,7 @@ export default class BaseStreamController extends TaskLoop {
     }
 
     // find fragment index, contiguous with end of buffer position
-    const start = fragments[0].start;
-    const end = fragments[fragLen - 1].start + fragments[fragLen - 1].duration;
+    const sliding = fragments[0].start;
     let loadPosition = pos;
     let frag;
 
@@ -403,7 +402,7 @@ export default class BaseStreamController extends TaskLoop {
         return null;
       }
       // Check to see if we're within the live range; if not, this method will seek to the live edge and return the new position
-      const syncPos = this.synchronizeToLiveEdge(start, end, loadPosition, levelDetails.targetduration, levelDetails.totalduration);
+      const syncPos = this.synchronizeToLiveEdge(loadPosition, sliding, levelDetails);
       if (syncPos !== null) {
         loadPosition = syncPos;
       }
@@ -414,13 +413,17 @@ export default class BaseStreamController extends TaskLoop {
       if (!levelDetails.PTSKnown && !startFragRequested) {
         frag = this.getInitialLiveFragment(levelDetails, fragments);
       }
-    } else if (loadPosition < start) {
+    } else if (loadPosition < sliding) {
       // VoD playlist: if loadPosition before start of playlist, load first fragment
       frag = fragments[0];
     }
 
     // If we haven't run into any special cases already, just load the fragment most closely matching the requested position
     if (!frag) {
+      const windowSize = Math.max(0, levelDetails.fragments.length - 1);
+      const offset = levelDetails.fragments.slice(0, windowSize).reduce((acc, curr) => acc + curr.duration, 0);
+      const end = sliding + offset;
+
       frag = this.getFragmentAtPosition(loadPosition, end, levelDetails);
     }
 
@@ -524,25 +527,24 @@ export default class BaseStreamController extends TaskLoop {
     return frag;
   }
 
-  protected synchronizeToLiveEdge (start: number, end: number, bufferEnd: number, targetDuration: number, totalDuration: number): number | null {
+  protected synchronizeToLiveEdge (bufferEnd: number, sliding: number, details: LevelDetails): number | null {
     const { config, media } = this;
 
-    let maxLatency: number = Infinity;
-    if (config.liveMaxLatencyDuration !== undefined) {
-      maxLatency = config.liveMaxLatencyDuration;
-    } else if (Number.isFinite(config.liveMaxLatencyDurationCount)) {
-      maxLatency = config.liveMaxLatencyDurationCount * targetDuration;
-    }
+    const { liveMaxLatencyDurationCount = Infinity } = config;
+    const windowSize = Math.max(0, details.fragments.length - 1 - liveMaxLatencyDurationCount);
+    const offset = details.fragments.slice(0, windowSize).reduce((acc, curr) => acc + curr.duration, 0);
 
-    if (bufferEnd < Math.max(start - config.maxFragLookUpTolerance, end - maxLatency)) {
-      const liveSyncPosition = this._liveSyncPosition = this.computeLivePosition(start, targetDuration, totalDuration);
-      this.log(`Buffer end: ${bufferEnd.toFixed(3)} is located too far from the end of live sliding playlist, reset currentTime to : ${liveSyncPosition.toFixed(3)}`);
+    if (bufferEnd < sliding || bufferEnd < sliding + offset) {
+      const liveSyncPosition = this._liveSyncPosition = this.computeLivePosition(sliding, details);
+      this.log(`Buffer end: ${bufferEnd.toFixed(3)} is located too far from the end of live sliding playlist, reset currentTime to: ${liveSyncPosition.toFixed(3)}`);
+
       this.nextLoadPosition = liveSyncPosition;
-      if (media?.readyState && media.duration > liveSyncPosition && liveSyncPosition > media.currentTime) {
+      if (media?.readyState && media.currentTime < liveSyncPosition && media.duration > liveSyncPosition) {
         media.currentTime = liveSyncPosition;
       }
       return liveSyncPosition;
     }
+
     return null;
   }
 
@@ -588,7 +590,7 @@ export default class BaseStreamController extends TaskLoop {
       } else {
         // if live playlist, set start position to be fragment N-this.config.liveSyncDurationCount (usually 3)
         if (details.live) {
-          this.startPosition = this.computeLivePosition(sliding, details.targetduration, details.totalduration);
+          this.startPosition = this.computeLivePosition(sliding, details);
           this.log(`Configure startPosition to ${this.startPosition}`);
         } else {
           this.startPosition = 0;
@@ -599,10 +601,12 @@ export default class BaseStreamController extends TaskLoop {
     this.nextLoadPosition = this.startPosition;
   }
 
-  protected computeLivePosition (sliding: number, targetDuration: number, totalDuration: number): number {
-    const { liveSyncDuration, liveSyncDurationCount } = this.config;
-    const targetLatency = liveSyncDuration !== undefined ? liveSyncDuration : liveSyncDurationCount * targetDuration;
-    return sliding + Math.max(0, totalDuration - targetLatency);
+  protected computeLivePosition (sliding: number, details: LevelDetails): number {
+    const { liveSyncDurationCount = 3 } = this.config;
+    const windowSize = Math.max(0, details.fragments.length - 1 - liveSyncDurationCount);
+
+    const offset = details.fragments.slice(0, windowSize).reduce((acc, curr) => acc + curr.duration, 0);
+    return sliding + offset;
   }
 
   protected getLoadPosition (): number {
